@@ -16,7 +16,7 @@ celery_app = Celery('tasks', broker='redis://localhost:6379/0', backend='redis:/
 celery_app.conf.broker_connection_retry_on_startup = True
 
 def save_password_to_file(file_path: str, password: str, attempts: int, elapsed_time: float):
-    """Сохранение найденного пароля в файл."""
+    """Сохранение найденного пароля в файл"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     result_dir = "cracked_passwords"
     
@@ -37,7 +37,7 @@ def save_password_to_file(file_path: str, password: str, attempts: int, elapsed_
                 return
     
     # Записываем информацию о найденном пароле
-    with open(result_file, "a", encoding="utf-8") as f:
+    with open(result_file, "w", encoding="utf-8") as f:  # Используем режим 'w' вместо 'a'
         f.write(f"Дата и время: {timestamp}\n")
         f.write(f"Архив: {archive_name}\n")
         f.write(f"Пароль: {password}\n")
@@ -68,7 +68,7 @@ def bruteforce_rar(self, file_path: str, min_length: int = 4, max_length: int = 
                    charset: Optional[str] = None, max_attempts: Optional[int] = None) -> dict:
     """Перебор паролей для RAR архива."""
     if charset is None:
-        charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"  # Уменьшаем набор символов
+        charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     
     logger.info(f"Начало перебора паролей для файла: {file_path}")
     
@@ -79,19 +79,17 @@ def bruteforce_rar(self, file_path: str, min_length: int = 4, max_length: int = 
     start_time = time.time()
     attempts = 0
     batch_size = 1000
-    password_found = False
+    
+    # Создаем временную директорию для распаковки
+    temp_dir = os.path.join(os.path.dirname(file_path), "temp_extract")
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
     
     try:
         for length in range(min_length, max_length + 1):
-            if password_found:
-                break
-                
             logger.info(f"Перебор паролей длины {length}")
             
             for password_batch in generate_password_batch(length, charset, batch_size):
-                if password_found:
-                    break
-                    
                 for password in password_batch:
                     if max_attempts and attempts >= max_attempts:
                         logger.info(f"Достигнут лимит попыток: {max_attempts}")
@@ -102,7 +100,7 @@ def bruteforce_rar(self, file_path: str, min_length: int = 4, max_length: int = 
                         }
                     
                     attempts += 1
-                    if attempts % 1000 == 0:
+                    if attempts % 100 == 0:  # Обновляем каждые 100 попыток вместо 1000
                         try:
                             logger.info(f"Попыток: {attempts}, текущий пароль: {password}")
                             self.update_state(state='PROGRESS', 
@@ -110,25 +108,37 @@ def bruteforce_rar(self, file_path: str, min_length: int = 4, max_length: int = 
                                                  'rate': attempts / (time.time() - start_time)})
                         except Exception as e:
                             logger.error(f"Ошибка обновления состояния: {str(e)}")
-                            # Продолжаем работу даже при ошибке обновления состояния
                     
                     try:
-                        result = subprocess.run(['unar', '-p', password, file_path], 
+                        # Очищаем временную директорию перед каждой попыткой
+                        for file in os.listdir(temp_dir):
+                            os.remove(os.path.join(temp_dir, file))
+                        
+                        # Пытаемся распаковать архив во временную директорию
+                        result = subprocess.run(['unar', '-p', password, '-o', temp_dir, file_path], 
                                              capture_output=True, text=True)
                         
                         if result.returncode == 0:
-                            elapsed_time = time.time() - start_time
-                            logger.info(f"Пароль найден: {password}")
-                            
-                            save_password_to_file(file_path, password, attempts, elapsed_time)
-                            password_found = True
-                            
-                            return {
-                                "status": "success",
-                                "password": password,
-                                "attempts": attempts,
-                                "elapsed_time": elapsed_time
-                            }
+                            # Проверяем, что файлы действительно распаковались
+                            extracted_files = os.listdir(temp_dir)
+                            if extracted_files:
+                                elapsed_time = time.time() - start_time
+                                logger.info(f"Пароль найден: {password}")
+                                
+                                # Сохраняем пароль только при успешном подборе
+                                save_password_to_file(file_path, password, attempts, elapsed_time)
+                                
+                                # Очищаем временную директорию
+                                for file in extracted_files:
+                                    os.remove(os.path.join(temp_dir, file))
+                                os.rmdir(temp_dir)
+                                
+                                return {
+                                    "status": "success",
+                                    "password": password,
+                                    "attempts": attempts,
+                                    "elapsed_time": elapsed_time
+                                }
                             
                     except Exception as e:
                         logger.error(f"Ошибка при попытке распаковать архив: {str(e)}")
@@ -142,6 +152,12 @@ def bruteforce_rar(self, file_path: str, min_length: int = 4, max_length: int = 
             "attempts": attempts,
             "elapsed_time": time.time() - start_time
         }
+    finally:
+        # Очищаем временную директорию в любом случае
+        if os.path.exists(temp_dir):
+            for file in os.listdir(temp_dir):
+                os.remove(os.path.join(temp_dir, file))
+            os.rmdir(temp_dir)
     
     elapsed_time = time.time() - start_time
     logger.info(f"Пароль не найден после {attempts} попыток")
